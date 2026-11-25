@@ -212,7 +212,7 @@ textarea{width:100%;min-height:120px;font:12px ui-monospace,Consolas,monospace;b
         <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;align-items:center">
           <label for="gh-owner">Usuário/org</label><input id="gh-owner" placeholder="ex.: rafael-cgb">
           <label for="gh-repo">Repositório</label><input id="gh-repo" placeholder="ex.: meta-producao">
-          <label for="gh-branch">Branch</label><input id="gh-branch" placeholder="main">
+          <label for="gh-branch">Branch</label><input id="gh-branch" placeholder="main (detectada sozinha)">
           <label for="gh-token">Token</label><input id="gh-token" type="password" placeholder="github_pat_...">
         </div>
         <div class="row" style="margin-top:12px"><button class="primary" id="gh-save">Salvar conexão</button><button id="gh-test">Testar</button><button id="gh-clear" class="danger">Remover token</button></div>
@@ -326,7 +326,6 @@ function renderHeader(){
   const md=$('#mode'); md.textContent = hasToken() ? 'Editor conectado' : 'Somente leitura'; md.classList.toggle('on',hasToken());
   const dv = dirty(); $('#dirty').hidden = !dv;
   $('#dirtynote').textContent = hasToken() ? 'Clique em publicar para gravar no repositório.' : 'Salvas só neste navegador. Conecte o GitHub na aba Publicação para publicar.';
-  $('#save').disabled = !hasToken();
 }
 function renderCal(){
   const [y,m]=ym, n=dim(y,m), rows=teamRows();
@@ -516,27 +515,45 @@ async function handleFiles(files){
 
 // ------- GitHub -------
 function ghMsg(t,err){ const m=$('#ghmsg'); m.hidden=false; m.className='msg'+(err?' err':''); m.textContent=t; }
-$('#gh-save').onclick=()=>{ const g=gh(); const tk=$('#gh-token').value; const n={owner:$('#gh-owner').value.trim(),repo:$('#gh-repo').value.trim(),branch:$('#gh-branch').value.trim()||'main',token: tk && !tk.startsWith('••') ? tk.trim() : g.token};
+$('#gh-save').onclick=()=>{ const g=gh(); const tk=$('#gh-token').value; let ow=$('#gh-owner').value.trim(), rp=$('#gh-repo').value.trim(); if(ow.includes('/')&&!rp){[ow,rp]=ow.split('/');} rp=rp.replace(/^.*github\.com\//,'').replace(/\.git$/,'').split('/').pop();
+  const n={owner:ow,repo:rp,branch:$('#gh-branch').value.trim()||'main',token: tk && !tk.startsWith('••') ? tk.trim() : g.token};
   LS.set('cgb-gh',JSON.stringify(n)); renderAll(); ghMsg(n.token?'Conexão salva neste navegador.':'Conexão salva, mas falta o token.'); };
 $('#gh-clear').onclick=()=>{ const g=gh(); delete g.token; LS.set('cgb-gh',JSON.stringify(g)); renderAll(); ghMsg('Token removido deste navegador.'); };
 async function api(path,opt={}){ const g=gh(); const r=await fetch(`https://api.github.com/repos/${g.owner}/${g.repo}/${path}`,{...opt,headers:{'Authorization':'Bearer '+g.token,'Accept':'application/vnd.github+json',...(opt.headers||{})}}); return r; }
 $('#gh-test').onclick=async()=>{ if(!hasToken()) return ghMsg('Preencha usuário, repositório e token e clique em salvar.',true);
-  try{ const r=await api(''); if(!r.ok) return ghMsg('GitHub respondeu '+r.status+'. Confira o nome do repositório e as permissões do token.',true);
-    const j=await r.json(); ghMsg('Conectado a '+j.full_name+'. Permissão de escrita: '+(j.permissions&&j.permissions.push?'sim':'não')+'.'); }
+  try{ const r=await api(''); if(!r.ok) return ghMsg('Erro '+r.status+': '+(ERR[r.status]||'confira os dados.'),true);
+    const j=await r.json(); ghMsg('Conectado a '+j.full_name+'. Branch: '+j.default_branch+'. Agora é só editar e clicar em Publicar no GitHub.'); const g=gh(); g.branch=j.default_branch; LS.set('cgb-gh',JSON.stringify(g)); renderJson(); }
   catch(e){ ghMsg('Não consegui falar com o GitHub daqui. Abra o painel pelo link do GitHub Pages.',true); } };
 function b64(s){ const b=new TextEncoder().encode(s); let bin=''; b.forEach(c=>bin+=String.fromCharCode(c)); return btoa(bin); }
+const ERR={401:'token inválido ou vencido. Gere um novo token e cole na aba Publicação.',
+  403:'o token não tem permissão de gravação. No token, em Repository permissions, deixe Contents como "Read and write".',
+  404:'repositório não encontrado ou o token não tem acesso a ele. Confira usuário (RGIT2026), repositório (LVCTRL) e se o token foi criado para esse repositório.',
+  409:'o arquivo mudou no GitHub enquanto você editava. Clique em publicar de novo.',
+  422:'o GitHub recusou a gravação. Confira o nome da branch.'};
 $('#save').onclick=async()=>{
+  if(!hasToken()){ location.hash='publicar'; ghMsg('Para publicar, preencha usuário, repositório e token aqui e clique em Salvar conexão.',true); return; }
   const btn=$('#save'); btn.disabled=true; btn.textContent='Publicando…';
   try{
-    const g=gh(); data.atualizado=new Date().toISOString();
-    const r0=await api(`contents/data.json?ref=${encodeURIComponent(g.branch)}`); let sha;
-    if(r0.ok) sha=(await r0.json()).sha; else if(r0.status!==404) throw new Error('leitura '+r0.status);
-    const body={message:'Atualiza produção/metas ('+new Date().toLocaleString('pt-BR')+')',content:b64(JSON.stringify(data,null,1)),branch:g.branch}; if(sha) body.sha=sha;
+    const g=gh();
+    const rr=await api(''); if(!rr.ok) throw {st:rr.status};
+    const repo=await rr.json(), branch=repo.default_branch||'main';
+    if(g.branch!==branch){ g.branch=branch; LS.set('cgb-gh',JSON.stringify(g)); }
+    const r0=await api(`contents/data.json?ref=${encodeURIComponent(branch)}`); let sha;
+    if(r0.ok) sha=(await r0.json()).sha; else if(r0.status!==404) throw {st:r0.status};
+    data.atualizado=new Date().toISOString();
+    const body={message:'Atualiza produção/metas ('+new Date().toLocaleString('pt-BR')+')',content:b64(JSON.stringify(data,null,1)),branch}; if(sha) body.sha=sha;
     const r=await api('contents/data.json',{method:'PUT',body:JSON.stringify(body)});
-    if(!r.ok) throw new Error('gravação '+r.status);
+    if(!r.ok){ let det=''; try{det=(await r.json()).message||''}catch(_){} throw {st:r.status,det}; }
     base=clone(data); LS.del('cgb-draft'); renderAll();
-    btn.textContent='Publicado'; setTimeout(()=>{btn.textContent='Publicar no GitHub';renderHeader();},1800);
-  }catch(e){ btn.textContent='Publicar no GitHub'; btn.disabled=false; location.hash='publicar'; ghMsg('Não foi possível publicar ('+e.message+'). Confira o token na aba Publicação. As alterações continuam salvas neste navegador.',true); }
+    $('#dirty').hidden=false; $('#dirtynote').textContent=''; 
+    $('#dirty').querySelector('b').textContent='Publicado. O link atualiza para todos em 1 a 2 minutos.';
+    btn.hidden=true; $('#discard').hidden=true;
+    setTimeout(()=>{ $('#dirty').querySelector('b').textContent='Alterações não publicadas.'; btn.hidden=false; $('#discard').hidden=false; btn.textContent='Publicar no GitHub'; renderHeader(); },5000);
+  }catch(e){
+    btn.textContent='Publicar no GitHub'; btn.disabled=false; location.hash='publicar';
+    const txt = e&&e.st ? ('Não foi possível publicar (erro '+e.st+'): '+(ERR[e.st]||e.det||'tente de novo.')) : 'Não foi possível falar com o GitHub. Verifique a internet e se o painel está aberto pelo link do GitHub Pages.';
+    ghMsg(txt+' Suas alterações continuam salvas neste navegador.',true);
+  }
 };
 $('#copyjson').onclick=async()=>{ const t=$('#json'); try{ await navigator.clipboard.writeText(t.value); $('#copyjson').textContent='Copiado'; }catch(e){ t.select(); } setTimeout(()=>$('#copyjson').textContent='Copiar JSON',1500); };
 $('#dljson').onclick=()=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([$('#json').value],{type:'application/json'})); a.download='data.json'; document.body.appendChild(a); a.click(); a.remove(); };
